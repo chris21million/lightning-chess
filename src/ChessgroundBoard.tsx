@@ -11,9 +11,11 @@ import "chessground/assets/chessground.cburnett.css";
 export default function ChessgroundBoard({
   game,
   onChange,
+  onMove,
 }: {
   game: Chess;
   onChange: () => void;
+  onMove?: (from: string, to: string) => void;
 }) {
   const elRef = useRef<HTMLDivElement | null>(null);
   const apiRef = useRef<Api | null>(null);
@@ -42,7 +44,13 @@ export default function ChessgroundBoard({
               return;
             }
 
+            // tell parent which move was made (for Nostr publish)
+            onMove?.(orig, dest);
+
+            // tell parent to re-render / update UI
             onChange();
+
+            // sync chessground UI
             apiRef.current?.set({
               fen: game.fen(),
               turnColor: game.turn() === "w" ? "white" : "black",
@@ -62,7 +70,7 @@ export default function ChessgroundBoard({
       apiRef.current?.destroy?.();
       apiRef.current = null;
     };
-  }, [game, onChange]);
+  }, [game, onChange, onMove]);
 
   // keep the UI in sync (so Reset updates the pieces)
   useEffect(() => {
