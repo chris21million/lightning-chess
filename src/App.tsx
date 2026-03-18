@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import ChessgroundBoard from "./ChessgroundBoard";
+import { randomId } from "./utils/id";
+import { shortKey } from "./utils/format";
+import { uciFromTo } from "./utils/chess";
+import { RELAYS, TOPIC_TAG, OFFER_KIND, ACCEPT_KIND, MOVE_KIND } from "./nostr/constants";
+import { parseOffer, tagValue } from "./nostr/tags";
+import type { Game, Offer, Signer } from "./nostr/types";
+import { useAuth } from "./nostr/useAuth";
 
 import {
   finalizeEvent,
@@ -8,92 +15,27 @@ import {
   nip19,
   type EventTemplate,
   SimplePool,
-  type Event as NostrEvent,
 } from "nostr-tools";
 
-type Signer =
-  | { type: "nip07"; pubkey: string }
-  | { type: "nsec"; pubkey: string; sk: Uint8Array }
-  | null;
 
-type Offer = {
-  id: string;
-  pubkey: string;
-  created_at: number;
-  offerId: string;
-  time: number;
-  inc: number;
-  color: "white" | "black" | "random";
-};
 
-type Game = {
-  gameId: string;
-  offerEventId: string;
-  white: string;
-  black: string;
-  time: number;
-  inc: number;
-};
 
-declare global {
-  interface Window {
-    nostr?: {
-      getPublicKey: () => Promise<string>;
-      signEvent: (event: EventTemplate) => Promise<any>;
-    };
-  }
-}
 
-const RELAYS = ["wss://relay.damus.io", "wss://relay.snort.social", "wss://nos.lol"];
-const TOPIC_TAG = "lightning-chess";
 
-const OFFER_KIND = 30078;
-const ACCEPT_KIND = 30079;
-const MOVE_KIND = 30080;
 
-function tagValue(ev: NostrEvent, name: string): string | null {
-  const t = ev.tags.find((x) => x[0] === name);
-  return t?.[1] ?? null;
-}
 
-function tagValues(ev: NostrEvent, name: string): string[] {
-  return ev.tags.filter((x) => x[0] === name).map((x) => x[1]).filter(Boolean);
-}
 
-function parseOffer(ev: NostrEvent): Offer | null {
-  const topics = tagValues(ev, "t");
-  if (!topics.includes(TOPIC_TAG)) return null;
 
-  const offerId = tagValue(ev, "d") ?? ev.id;
-  const time = Number(tagValue(ev, "time") ?? "60");
-  const inc = Number(tagValue(ev, "inc") ?? "0");
-  const colorRaw = (tagValue(ev, "color") ?? "random").toLowerCase();
 
-  const color =
-    colorRaw === "white" || colorRaw === "black" || colorRaw === "random"
-      ? (colorRaw as Offer["color"])
-      : "random";
 
-  if (!Number.isFinite(time) || time <= 0) return null;
-  if (!Number.isFinite(inc) || inc < 0) return null;
 
-  return { id: ev.id, pubkey: ev.pubkey, created_at: ev.created_at, offerId, time, inc, color };
-}
 
-function randomId(len = 12) {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let out = "";
-  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
-}
 
-function shortKey(pk: string) {
-  return `${pk.slice(0, 8)}…${pk.slice(-8)}`;
-}
 
-function uciFromTo(from: string, to: string) {
-  return `${from}${to}`; // promotion omitted for now (we always promote to queen in board)
-}
+
+
+
+
 
 export default function App() {
   // chess
@@ -108,50 +50,19 @@ export default function App() {
     lastMoveEventIdRef.current = "none";
   };
 
-  // auth
-  const [signer, setSigner] = useState<Signer>(null);
-  const [nsecInput, setNsecInput] = useState("");
-  const pubkey = signer?.pubkey ?? null;
+// auth
+const {
+  signer,
+  pubkey,
+  nsecInput,
+  setNsecInput,
+  hasNip07,
+  loginWithExtension,
+  loginWithNsec,
+  logout,
+  signEvent,
+} = useAuth();
 
-  const hasNip07 = typeof window !== "undefined" && !!window.nostr;
-
-  const loginWithExtension = async () => {
-    if (!window.nostr) {
-      alert("No NIP-07 extension found. Install Alby or nos2x.");
-      return;
-    }
-    const pk = await window.nostr.getPublicKey();
-    setSigner({ type: "nip07", pubkey: pk });
-  };
-
-  const loginWithNsec = () => {
-    try {
-      const decoded = nip19.decode(nsecInput.trim());
-      if (decoded.type !== "nsec") throw new Error("Not an nsec");
-      const sk = decoded.data as Uint8Array;
-      const pk = getPublicKey(sk);
-      setSigner({ type: "nsec", pubkey: pk, sk });
-    } catch {
-      alert("Invalid nsec.");
-    }
-  };
-
-  const logout = () => {
-    setSigner(null);
-    setNsecInput("");
-  };
-
-  const signEvent = useCallback(
-    async (draft: EventTemplate) => {
-      if (!signer) throw new Error("Not logged in");
-      if (signer.type === "nip07") {
-        if (!window.nostr) throw new Error("No NIP-07 extension found");
-        return await window.nostr.signEvent(draft);
-      }
-      return finalizeEvent(draft, signer.sk);
-    },
-    [signer]
-  );
 
   // pool (used for both lobby + game)
   const poolRef = useRef<SimplePool | null>(null);
