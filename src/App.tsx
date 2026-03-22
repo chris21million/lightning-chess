@@ -38,6 +38,8 @@ import {
 
 
 export default function App() {
+  const [menuOpen, setMenuOpen] = useState(false);
+
   // chess
   const gameRef = useRef(new Chess());
   const [, setTick] = useState(0);
@@ -81,23 +83,51 @@ const {
   const lastPlyRef = useRef(0); // number of half-moves accepted
   const lastMoveEventIdRef = useRef<string>("none");
 
+  // ====================== LOBBY SUBSCRIPTION - Using kind 30078 ======================
   useEffect(() => {
+    if (!pubkey) {
+      setOffers([]);
+      setRelayStatus("disconnected");
+      return;
+    }
+
     const pool = new SimplePool();
     poolRef.current = pool;
     setRelayStatus("connecting");
 
+    console.log(`🔌 Subscribing to offers as ${shortKey(pubkey)}`);
+
     const sub = pool.subscribeMany(
       RELAYS,
-      [{ kinds: [OFFER_KIND], "#t": [TOPIC_TAG], limit: 50, since: Math.floor(Date.now() / 1000) - 86400 }],
+      
+        {
+          kinds: [OFFER_KIND],                    // ← This matches what createOffer is publishing
+          "#t": [TOPIC_TAG],
+          since: Math.floor(Date.now() / 1000),
+          limit: 100,
+        },
+      
       {
-        onevent(ev) {
-          const offer = parseOffer(ev);
-          if (!offer) return;
+      onevent(ev) {
+  console.log("👀 RAW EVENT", ev);
+
+  const offer = parseOffer(ev);
+  if (!offer) {
+    console.log("❌ parseOffer returned null");
+    return;
+  }
+
+          console.log("🎉 New offer received from", shortKey(ev.pubkey), "id:", ev.id?.slice(0,8));
+
           setOffers((prev) => {
             if (prev.some((x) => x.id === offer.id)) return prev;
             const next = [offer, ...prev].sort((a, b) => b.created_at - a.created_at);
             return next.slice(0, 50);
           });
+          setRelayStatus("connected");
+        },
+        oneose() {
+          console.log("📭 End of stored offers");
           setRelayStatus("connected");
         },
       }
@@ -109,37 +139,50 @@ const {
       poolRef.current = null;
       setRelayStatus("disconnected");
     };
-  }, []);
+  }, [pubkey]);
 
-  const createOffer = useCallback(async () => {
-    try {
-      if (!pubkey) return alert("Login first");
+ const createOffer = useCallback(async () => {
+  try {
+    if (!pubkey) return alert("Login first");
+    if (!poolRef.current) return alert("No relay pool");
 
-      const offerId = randomId(12);
+    const offerId = randomId(12);
 
-      const draft: EventTemplate = {
-        kind: OFFER_KIND,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ["d", offerId],
-          ["t", TOPIC_TAG],
-          ["time", String(offerSeconds)],
-          ["inc", String(offerInc)],
-          ["color", offerColor],
-        ],
-        content: "",
-      };
+    const draft: EventTemplate = {
+      kind: OFFER_KIND,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["d", offerId],
+        ["t", TOPIC_TAG],
+        ["time", String(offerSeconds)],
+        ["inc", String(offerInc)],
+        ["color", offerColor],
+        ["p", pubkey],                    // temporary for testing
+      ],
+      content: `Lightning Chess ${offerSeconds}s + ${offerInc}s`,
+    };
 
-      const signed = await signEvent(draft);
-      const pool = poolRef.current;
-      if (!pool) throw new Error("No relay pool");
-      await Promise.any(pool.publish(RELAYS, signed));
-      alert("Offer published.");
-    } catch (e: any) {
-      console.error(e);
-      alert(`Failed to publish offer: ${e?.message ?? e}`);
-    }
-  }, [offerColor, offerInc, offerSeconds, pubkey, signEvent]);
+    const signed = await signEvent(draft);
+    const pool = poolRef.current;
+
+    console.log("📤 Publishing offer from", shortKey(pubkey));
+
+    const publishPromises = pool.publish(RELAYS, signed);
+
+    publishPromises.forEach((promise, i) => {
+      promise
+        .then(() => console.log(`✅ Offer reached relay ${i}: ${RELAYS[i]}`))
+        .catch((err) => console.log(`❌ Failed on relay ${i}: ${RELAYS[i]}`, err?.message || err));
+    });
+
+    await new Promise((r) => setTimeout(r, 2000));
+
+    alert("Offer published! Check console for details.");
+  } catch (e: any) {
+    console.error(e);
+    alert(`Failed to publish offer: ${e?.message ?? e}`);
+  }
+}, [pubkey, offerSeconds, offerInc, offerColor, signEvent]);
 
   const acceptOffer = useCallback(
     async (offer: Offer) => {
@@ -197,7 +240,50 @@ const {
     },
     [pubkey, signEvent, forceUpdate]
   );
+  useEffect(() => {
+    if (!pubkey) return;
+    const pool = poolRef.current;
+    if (!pool) return;
+    const sub = pool.subscribeMany(
+      RELAYS,
+      {
+        kinds: [ACCEPT_KIND],
+        "#p": [pubkey],
+        since: Math.floor(Date.now() / 1000) - 7200,
+        limit: 50,
+      },
+      {
+        onevent(ev) {
+          const offerEventId = tagValue(ev, "e");
+          const gameId = tagValue(ev, "d");
+          const white = tagValue(ev, "white");
+          const black = tagValue(ev, "black");
+          const time = Number(tagValue(ev, "time") || "0");
+          const inc = Number(tagValue(ev, "inc") || "0");
+          if (!offerEventId || !gameId || !white || !black) return;
+          console.log("ACCEPT EVENT", { offerEventId, knownOffers: offers.map((o) => o.id) });
 
+          
+
+          gameRef.current.reset();
+          lastPlyRef.current = 0;
+          lastMoveEventIdRef.current = "none";
+          forceUpdate();
+          setGame({
+            gameId,
+            offerEventId,
+            white,
+            black,
+            time,
+            inc,
+          });
+        },
+      }
+    );
+    return () => {
+      try { sub.close(); } catch {}
+    };
+  }, [pubkey, forceUpdate]);
   const leaveGame = () => {
     setGame(null);
     reset();
@@ -211,14 +297,14 @@ const {
 
     const sub = pool.subscribeMany(
       RELAYS,
-      [
+      
         {
           kinds: [MOVE_KIND],
           "#d": [game.gameId],
           since: Math.floor(Date.now() / 1000) - 60 * 10,
           limit: 200,
         },
-      ],
+      
       {
         onevent(ev) {
           // ignore our own events (we already applied move locally)
@@ -322,66 +408,120 @@ const {
         gap: 12,
       }}
     >
-      <h1 style={{ margin: 0 }}>Lightning Chess</h1>
+      {menuOpen && (
+  <div
+    onClick={() => setMenuOpen(false)}
+    style={{
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.55)",
+      zIndex: 1000,
+    }}
+  >
+    <div
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        position: "absolute",
+        top: 0,
+        right: 0,
+        height: "100%",
+        width: 320,
+        maxWidth: "85vw",
+        background: "#1b1b1b",
+        borderLeft: "1px solid rgba(255,255,255,0.15)",
+        padding: 16,
+        boxSizing: "border-box",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+  <div style={{ fontWeight: 700 }}>Menu</div>
+  <button onClick={() => setMenuOpen(false)}>Close</button>
+</div>
 
-      {/* Login */}
+     <div style={{ opacity: 0.85, fontSize: 12, marginBottom: 12 }}>
+  {pubkey ? (
+    <div>
+      Logged in as <span style={{ fontFamily: "monospace" }}>{shortPk}</span>
+    </div>
+  ) : (
+    <div>Not logged in</div>
+  )}
+</div>
+{pubkey && (
+  <button onClick={logout} style={{ width: "100%" }}>
+    Logout
+  </button>
+)}
+{!pubkey && (
+  <button onClick={loginWithExtension} disabled={!hasNip07} style={{ width: "100%" }}>
+    Login with Extension (NIP-07)
+  </button>
+)}
+{!pubkey && !hasNip07 && (
+  <div style={{ opacity: 0.7, fontSize: 12, marginTop: 8 }}>
+    No extension detected (install Alby or nos2x)
+  </div>
+)}
+{!pubkey && (
+  <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+    <input
+      value={nsecInput}
+      onChange={(e) => setNsecInput(e.target.value)}
+      placeholder="nsec1..."
+      style={{
+        width: "100%",
+        padding: 8,
+        borderRadius: 6,
+        border: "1px solid rgba(255,255,255,0.2)",
+        background: "rgba(0,0,0,0.2)",
+        color: "white",
+        boxSizing: "border-box",
+      }}
+    />
+    <button onClick={loginWithNsec} style={{ width: "100%" }}>
+      Login with nsec
+    </button>
+  </div>
+)}
+
+    </div>
+  </div>
+)}
+
       <div
-        style={{
-          width: "min(92vw, 760px)",
-          border: "1px solid rgba(255,255,255,0.15)",
-          borderRadius: 8,
-          padding: 12,
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-        }}
-      >
-        {pubkey ? (
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-            <div>
-              <div style={{ opacity: 0.8, fontSize: 12 }}>Logged in as</div>
-              <div style={{ fontFamily: "monospace" }}>{shortPk}</div>
-              <div style={{ opacity: 0.8, fontSize: 12 }}>
-                Method: {signer!.type === "nip07" ? "NIP-07 extension" : "nsec"}
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={logout}>Logout</button>
-            </div>
-          </div>
-        ) : (
-          <>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button onClick={loginWithExtension} disabled={!hasNip07}>
-                Login with Extension (NIP-07)
-              </button>
-              {!hasNip07 && (
-                <div style={{ opacity: 0.7, fontSize: 12, alignSelf: "center" }}>
-                  (No extension detected)
-                </div>
-              )}
-            </div>
+  style={{
+    width: "min(92vw, 760px)",
+    position: "relative",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+  }}
+>
 
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <input
-                value={nsecInput}
-                onChange={(e) => setNsecInput(e.target.value)}
-                placeholder="nsec1..."
-                style={{
-                  flex: 1,
-                  minWidth: 220,
-                  padding: 8,
-                  borderRadius: 6,
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  background: "rgba(0,0,0,0.2)",
-                  color: "white",
-                }}
-              />
-              <button onClick={loginWithNsec}>Login with nsec</button>
-            </div>
-          </>
-        )}
-      </div>
+<h1
+  style={{
+    margin: 0,
+    color: "#f7d300",
+    fontWeight: 800,
+    letterSpacing: 0.5,
+    textShadow: "0 0 12px rgba(247, 211, 0, 0.35)",
+  }}
+>
+  Lightning Chess ⚡
+</h1>
+<button
+  onClick={() => setMenuOpen((v) => !v)}
+  style={{ position: "absolute", right: 0 }}
+>
+
+  {menuOpen ? "Close" : "Menu"}
+</button>
+</div>
+
+
+
+
+
 
       {/* Lobby / Game */}
       <div
@@ -410,7 +550,7 @@ const {
           <>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
               <div>
-                <div style={{ fontWeight: 600 }}>Open Lobby</div>
+                <div style={{ fontWeight: 600 }}>Find a Game</div>
                 <div style={{ opacity: 0.75, fontSize: 12 }}>
                   Relays: {relayStatus} ({RELAYS.length})
                 </div>
@@ -455,6 +595,9 @@ const {
                 <button onClick={createOffer} disabled={!pubkey}>
                   Create Offer
                 </button>
+                <button onClick={() => window.location.reload()}>
+  Refresh Offers
+</button>
               </div>
             </div>
 
