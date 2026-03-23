@@ -2,25 +2,59 @@ import { useCallback, useEffect, useState } from "react";
 import { finalizeEvent, getPublicKey, nip19, type EventTemplate } from "nostr-tools";
 import type { Signer } from "./types";
 
+const STORAGE_KEY = "pawnstr:signer";
+
 export function useAuth() {
   const [signer, setSigner] = useState<Signer>(null);
   const [nsecInput, setNsecInput] = useState("");
 
   const pubkey = signer?.pubkey ?? null;
 
-  // Robust NIP-07 detection (extensions sometimes inject after first render)
+  // RESTORE SESSION ON LOAD
+  useEffect(() => {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+
+    try {
+      const parsed = JSON.parse(raw);
+
+      if (
+        parsed &&
+        parsed.type === "nip07" &&
+        typeof parsed.pubkey === "string"
+      ) {
+        setSigner(parsed);
+        return;
+      }
+
+      if (
+        parsed &&
+        parsed.type === "nsec" &&
+        typeof parsed.pubkey === "string" &&
+        Array.isArray(parsed.sk)
+      ) {
+        setSigner({
+          type: "nsec",
+          pubkey: parsed.pubkey,
+          sk: new Uint8Array(parsed.sk),
+        });
+      }
+    } catch (e) {
+      console.error("Failed to restore signer", e);
+    }
+  }, []);
+
+  // Robust NIP-07 detection
   const [hasNip07, setHasNip07] = useState(false);
 
   useEffect(() => {
     const check = () => typeof window !== "undefined" && !!window.nostr;
 
-    // Immediate check
     if (check()) {
       setHasNip07(true);
       return;
     }
 
-    // Poll briefly (up to 5s)
     const interval = window.setInterval(() => {
       if (check()) {
         setHasNip07(true);
@@ -48,7 +82,11 @@ export function useAuth() {
 
     try {
       const pk = await window.nostr.getPublicKey();
-      setSigner({ type: "nip07", pubkey: pk });
+
+      const signerObj = { type: "nip07", pubkey: pk } as const;
+
+      setSigner(signerObj);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(signerObj));
     } catch (e) {
       console.error(e);
       alert("Extension rejected the request or failed.");
@@ -56,6 +94,12 @@ export function useAuth() {
   }, []);
 
   const loginWithNsec = useCallback(() => {
+    const confirmed = window.confirm(
+      "Warning: Pasting your nsec is dangerous.\n\nThis gives the website access to your private key. Only continue if you trust this site and understand the risk.\n\nDo you want to continue?"
+    );
+
+    if (!confirmed) return;
+
     try {
       const trimmed = nsecInput.trim();
       const decoded = nip19.decode(trimmed);
@@ -64,8 +108,24 @@ export function useAuth() {
       const sk = decoded.data as Uint8Array;
       const pk = getPublicKey(sk);
 
-      setSigner({ type: "nsec", pubkey: pk, sk });
-      setNsecInput(""); // clear secret from UI after success
+      const signerObj = {
+        type: "nsec" as const,
+        pubkey: pk,
+        sk,
+      };
+
+      setSigner(signerObj);
+      setNsecInput("");
+
+      // EASY BUT UNSAFE: persist secret key in localStorage
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          type: "nsec",
+          pubkey: pk,
+          sk: Array.from(sk),
+        })
+      );
     } catch (e) {
       console.error(e);
       alert("Invalid nsec. It should start with nsec1...");
@@ -75,6 +135,7 @@ export function useAuth() {
   const logout = useCallback(() => {
     setSigner(null);
     setNsecInput("");
+    localStorage.removeItem(STORAGE_KEY);
   }, []);
 
   const signEvent = useCallback(
@@ -82,11 +143,12 @@ export function useAuth() {
       if (!signer) throw new Error("Not logged in");
 
       if (signer.type === "nip07") {
-        if (!window.nostr?.signEvent) throw new Error("No NIP-07 signing available");
+        if (!window.nostr?.signEvent) {
+          throw new Error("No NIP-07 signing available");
+        }
         return await window.nostr.signEvent(draft);
       }
 
-      // nsec signer
       return finalizeEvent(draft, signer.sk);
     },
     [signer]
@@ -94,7 +156,7 @@ export function useAuth() {
 
   return {
     signer,
-    setSigner, // optional, but handy
+    setSigner,
     pubkey,
 
     nsecInput,
@@ -108,4 +170,3 @@ export function useAuth() {
     signEvent,
   };
 }
-
