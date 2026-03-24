@@ -3,6 +3,6 @@ import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: "/lightning-chess-folder-reorg/",
+  base: "/lightning-chess/",
   plugins: [react()],
 })
