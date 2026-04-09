@@ -1,8 +1,7 @@
 export const RELAYS = [
-  "wss://relay.snort.social",
-  "wss://nostr.wine",
   "wss://relay.damus.io",
   "wss://relay.primal.net",
+  "wss://nos.lol",
 ];
 
 export const TOPIC_TAG = "lightning-chess";

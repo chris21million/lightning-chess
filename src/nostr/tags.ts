@@ -22,7 +22,7 @@ export function tagValues(ev: NostrEvent, name: string): string[] {
 
 export function parseOffer(ev: NostrEvent): Offer | null {
   const topics = tagValues(ev, "t");
-  if (!topics.includes(TOPIC_TAG)) return null;
+  
 
   const offerId = tagValue(ev, "d") ?? ev.id;
   const time = Number(tagValue(ev, "time") ?? "60");

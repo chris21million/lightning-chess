@@ -26,24 +26,31 @@ export function useLobbyGame({
   const poolRef = useRef<SimplePool | null>(null);
   const activeGameIdRef = useRef<string | null>(null);
 
-  const [relayStatus, setRelayStatus] = useState<"disconnected" | "connecting" | "connected">("disconnected");
+  const [relayStatus, setRelayStatus] = useState<
+    "disconnected" | "connecting" | "connected"
+  >("disconnected");
+
   const [offers, setOffers] = useState<Offer[]>([]);
 
-  // Offer creation settings
   const [offerSeconds, setOfferSeconds] = useState(60);
   const [offerInc, setOfferInc] = useState(0);
   const [offerColor, setOfferColor] = useState<Offer["color"]>("random");
 
-  // Challenge specific player
   const [challengeNpub, setChallengeNpub] = useState("");
   const [isChallenging, setIsChallenging] = useState(false);
 
   const [game, setGame] = useState<Game | null>(null);
+  const [myOfferEventId, setMyOfferEventId] = useState<string | null>(null);
 
-  // 1. Offers subscription
+  // ==================== SUBSCRIPTIONS ====================
   useEffect(() => {
+    setOffers([]);
+
     if (!pubkey) {
-      setOffers([]);
+      if (poolRef.current) {
+        try { poolRef.current.close(RELAYS); } catch {}
+        poolRef.current = null;
+      }
       setRelayStatus("disconnected");
       activeGameIdRef.current = null;
       return;
@@ -51,52 +58,112 @@ export function useLobbyGame({
 
     const pool = new SimplePool();
     poolRef.current = pool;
+
     setRelayStatus("connecting");
+    console.log(`🔌 Subscribing as ${shortKey(pubkey)}`);
 
-    console.log(`🔌 Subscribing to offers as ${shortKey(pubkey)}`);
+    const since = Math.floor(Date.now() / 1000) - 3600;
 
-    const sub = pool.subscribeMany(
+    // ===== OFFERS =====
+    const offerSub = pool.subscribeMany(
       RELAYS,
-      {
-        kinds: [OFFER_KIND],
-        "#t": [TOPIC_TAG],
-        since: Math.floor(Date.now() / 1000),
-        limit: 100,
-      },
+      [
+        {
+          kinds: [OFFER_KIND],
+          "#t": [TOPIC_TAG],
+          since,
+        },
+      ],
       {
         onevent(ev) {
+          console.log("📨 Raw offer event:", ev);
           const offer = parseOffer(ev);
+          console.log("📋 Parsed offer:", offer);
           if (!offer) return;
 
-          console.log("🎉 New offer received from", shortKey(ev.pubkey), "id:", ev.id?.slice(0, 8));
-
-          setOffers((prev) => {
-            if (prev.some((x) => x.id === offer.id)) return prev;
-            return [offer, ...prev].sort((a, b) => b.created_at - a.created_at).slice(0, 50);
+          setOffers(prev => {
+            if (prev.find(o => o.id === offer.id)) return prev;
+            return [offer, ...prev];
           });
-          setRelayStatus("connected");
         },
         oneose() {
+          console.log("✅ Offers EOSE");
           setRelayStatus("connected");
         },
       }
     );
 
-    return () => {
-      try {
-        sub.close();
-        pool.close(RELAYS);
-      } catch (e) {
-        console.warn("Error closing offer subscription", e);
+    // ===== ACCEPTS =====
+    const acceptSub = pool.subscribeMany(
+      RELAYS,
+      [
+        {
+          kinds: [ACCEPT_KIND],
+          "#p": [pubkey],
+          since: Math.floor(Date.now() / 1000) - 30, // ← only last 30 seconds
+        },
+      ],
+      {
+        onevent(ev) {
+          console.log("📨 Accept received!", ev);
+          console.log("activeGameId:", activeGameIdRef.current);
+          const gameId = tagValue(ev, "d");
+          const white = tagValue(ev, "white");
+          const black = tagValue(ev, "black");
+          const time = Number(tagValue(ev, "time") || 0);
+          const inc = Number(tagValue(ev, "inc") || 0);
+          const offerEventId = tagValue(ev, "e") || "";
+
+          if (!gameId || !white || !black) return;
+          if (activeGameIdRef.current === gameId) return;
+
+          gameRef.current?.reset?.();
+          lastPlyRef.current = 0;
+          lastMoveEventIdRef.current = "none";
+          forceUpdate();
+
+          activeGameIdRef.current = gameId;
+
+          setGame({
+            gameId,
+            offerEventId,
+            white,
+            black,
+            time,
+            inc,
+          });
+
+          alert("Your offer was accepted! Game started.");
+        },
       }
+    );
+
+    return () => {
+      try { offerSub.close(); } catch {}
+      try { acceptSub.close(); } catch {}
+      try { pool.close(RELAYS); } catch {}
       poolRef.current = null;
       setRelayStatus("disconnected");
     };
-  }, [pubkey]);
+  }, [pubkey, forceUpdate, gameRef, lastPlyRef, lastMoveEventIdRef]);
 
-  // 2. Create public offer (visible to everyone)
+  // ==================== PUBLISH HELPER ====================
+  const publish = async (pool: SimplePool, event: any) => {
+    try {
+      await Promise.any(pool.publish(RELAYS, event));
+      console.log("✅ published");
+    } catch (e) {
+      console.log("❌ publish error", e);
+      throw e;
+    }
+  };
+
+  // ==================== CREATE OFFER ====================
   const createOffer = useCallback(async () => {
-    if (!pubkey || !poolRef.current) return alert("Login first");
+    if (!pubkey) return alert("Login first");
+
+    const pool = poolRef.current;
+    if (!pool) return alert("Not connected yet");
 
     const offerId = randomId(12);
 
@@ -116,75 +183,109 @@ export function useLobbyGame({
 
     try {
       const signed = await signEvent(draft);
-      await Promise.any(poolRef.current!.publish(RELAYS, signed));
-      alert("Offer published to the lobby!");
+      await publish(pool, signed);
+      setMyOfferEventId(signed.id);
+
+      alert("Offer published!");
     } catch (e: any) {
       console.error(e);
-      alert(`Failed to publish offer: ${e?.message ?? e}`);
+      alert(e.message);
     }
   }, [pubkey, offerSeconds, offerInc, offerColor, signEvent]);
 
-  // 3. Challenge specific npub (new feature inspired by ChessNut)
-  const challengePlayer = useCallback(async () => {
-    if (!pubkey || !poolRef.current) return alert("Login first");
-    if (!challengeNpub.trim()) return alert("Please paste an npub");
+  // ==================== CANCEL OFFER ====================
+const cancelOffer = useCallback(async (offerEventId: string) => {
+  if (!pubkey) return;
+  const pool = poolRef.current;
+  if (!pool) return;
 
-    const targetNpub = challengeNpub.trim();
-    setIsChallenging(true);
+  const draft: EventTemplate = {
+    kind: 5,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["e", offerEventId]],
+    content: "offer cancelled",
+  };
 
+  try {
+    const signed = await signEvent(draft);
+    await publish(pool, signed);
+    setMyOfferEventId(null);
+    // remove from local list immediately so UI updates right away
+    setOffers(prev => prev.filter(o => o.id !== offerEventId));
+  } catch (e: any) {
+    alert(e.message);
+  }
+}, [pubkey, signEvent]);
+
+// ==================== CHALLENGE PLAYER ====================
+const challengePlayer = useCallback(async () => {
+  if (!pubkey) return alert("Login first");
+  if (!challengeNpub.trim()) return alert("Paste an npub first");
+
+  const pool = poolRef.current;
+  if (!pool) return alert("Not connected");
+
+  // convert npub to hex if needed
+  let targetPubkey = challengeNpub.trim();
+  if (targetPubkey.startsWith("npub1")) {
     try {
-      const offerId = randomId(12);
-
-      const draft: EventTemplate = {
-        kind: OFFER_KIND,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ["d", offerId],
-          ["t", TOPIC_TAG],
-          ["time", String(offerSeconds)],
-          ["inc", String(offerInc)],
-          ["color", offerColor],
-          ["p", pubkey],
-          ["p", targetNpub],           // Target specific player
-        ],
-        content: `Challenge: Lightning Chess ${offerSeconds}s + ${offerInc}s`,
-      };
-
-      const signed = await signEvent(draft);
-      await Promise.any(poolRef.current!.publish(RELAYS, signed));
-
-      alert(`Challenge sent to ${shortKey(targetNpub)}!`);
-      setChallengeNpub(""); // Clear input after success
-    } catch (e: any) {
-      console.error("Challenge failed:", e);
-      alert(`Failed to send challenge: ${e?.message ?? e}`);
-    } finally {
-      setIsChallenging(false);
+      const { nip19 } = await import("nostr-tools");
+      const decoded = nip19.decode(targetPubkey);
+      if (decoded.type !== "npub") return alert("Invalid npub");
+      targetPubkey = decoded.data as string;
+    } catch {
+      return alert("Invalid npub format");
     }
-  }, [pubkey, challengeNpub, offerSeconds, offerInc, offerColor, signEvent]);
+  }
 
-  // 4. Accept Offer
+  const offerId = randomId(12);
+  setIsChallenging(true);
+
+  const draft: EventTemplate = {
+    kind: OFFER_KIND,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [
+      ["d", offerId],
+      ["t", TOPIC_TAG],
+      ["time", String(offerSeconds)],
+      ["inc", String(offerInc)],
+      ["color", offerColor],
+      ["p", pubkey],
+      ["p", targetPubkey],   // ← this targets a specific player
+      ["challenge", targetPubkey],
+    ],
+    content: `Chess challenge ${offerSeconds}s + ${offerInc}s`,
+  };
+
+  try {
+    const signed = await signEvent(draft);
+    await publish(pool, signed);
+    setMyOfferEventId(signed.id);
+    setChallengeNpub("");
+    alert("Challenge sent!");
+  } catch (e: any) {
+    alert(e.message);
+  } finally {
+    setIsChallenging(false);
+  }
+}, [pubkey, challengeNpub, offerSeconds, offerInc, offerColor, signEvent]);
+
+  // ==================== ACCEPT OFFER ====================
   const acceptOffer = useCallback(
     async (offer: Offer) => {
-      console.log("🔘 Accept button clicked for offer:", offer.id);
-
       if (!pubkey) return alert("Login first");
-      if (pubkey === offer.pubkey) return alert("That is your own offer.");
+      if (pubkey === offer.pubkey) return;
+
+      const pool = poolRef.current;
+      if (!pool) return alert("Not connected");
 
       const gameId = randomId(14);
 
-      let white = "";
-      let black = "";
-      if (offer.color === "white") {
-        white = offer.pubkey;
-        black = pubkey;
-      } else if (offer.color === "black") {
-        black = offer.pubkey;
-        white = pubkey;
-      } else {
-        white = pubkey;
-        black = offer.pubkey;
-      }
+      const white =
+        offer.color === "black" ? pubkey : offer.pubkey;
+
+      const black =
+        offer.color === "black" ? offer.pubkey : pubkey;
 
       const draft: EventTemplate = {
         kind: ACCEPT_KIND,
@@ -192,6 +293,7 @@ export function useLobbyGame({
         tags: [
           ["e", offer.id],
           ["p", offer.pubkey],
+          ["p", pubkey],
           ["d", gameId],
           ["white", white],
           ["black", black],
@@ -203,11 +305,8 @@ export function useLobbyGame({
 
       try {
         const signed = await signEvent(draft);
-        if (!poolRef.current) throw new Error("No relay pool");
+        await publish(pool, signed);
 
-        await Promise.any(poolRef.current.publish(RELAYS, signed));
-
-        // Reset local game state
         gameRef.current?.reset?.();
         lastPlyRef.current = 0;
         lastMoveEventIdRef.current = "none";
@@ -215,61 +314,26 @@ export function useLobbyGame({
 
         activeGameIdRef.current = gameId;
 
-        setGame({ gameId, offerEventId: offer.id, white, black, time: offer.time, inc: offer.inc });
-        alert("Game started! You are now playing.");
+        setGame({
+          gameId,
+          offerEventId: offer.id,
+          white,
+          black,
+          time: offer.time,
+          inc: offer.inc,
+        });
+
+        alert("Game started!");
       } catch (e: any) {
-        console.error("❌ Accept failed:", e);
-        alert(`Failed to accept offer: ${e?.message ?? e}`);
+        console.error(e);
+        alert(e.message);
       }
     },
     [pubkey, signEvent, forceUpdate, gameRef, lastPlyRef, lastMoveEventIdRef]
   );
 
-  // 5. Listen for ACCEPT events
-  useEffect(() => {
-    if (!pubkey || !poolRef.current) return;
-
-    const sub = poolRef.current.subscribeMany(
-      RELAYS,
-      {
-        kinds: [ACCEPT_KIND],
-        "#p": [pubkey],
-        since: Math.floor(Date.now() / 1000) - 300,
-        limit: 20,
-      },
-      {
-        onevent(ev) {
-          const gameId = tagValue(ev, "d");
-          const white = tagValue(ev, "white");
-          const black = tagValue(ev, "black");
-          const time = Number(tagValue(ev, "time") || 0);
-          const inc = Number(tagValue(ev, "inc") || 0);
-          const offerEventId = tagValue(ev, "e") || "";
-
-          if (!gameId || !white || !black) return;
-
-          if (activeGameIdRef.current === gameId) return;
-
-          gameRef.current?.reset?.();
-          lastPlyRef.current = 0;
-          lastMoveEventIdRef.current = "none";
-          forceUpdate();
-
-          activeGameIdRef.current = gameId;
-          setGame({ gameId, offerEventId, white, black, time, inc });
-        },
-      }
-    );
-
-    return () => {
-      try { sub.close(); } catch {}
-    };
-  }, [pubkey]);
-
-  // 6. Leave Game
+  // ==================== LEAVE ====================
   const leaveGame = useCallback(() => {
-    console.log("🚪 Leaving current game...");
-
     activeGameIdRef.current = null;
     setGame(null);
     gameRef.current?.reset?.();
@@ -288,16 +352,15 @@ export function useLobbyGame({
     setOfferInc,
     offerColor,
     setOfferColor,
-
-    // Challenge feature
     challengeNpub,
     setChallengeNpub,
     isChallenging,
-    challengePlayer,
-
     game,
     createOffer,
     acceptOffer,
     leaveGame,
+    myOfferEventId,
+    cancelOffer,
+    challengePlayer,
   };
 }

@@ -1,42 +1,78 @@
-import { useCallback, useEffect, useState } from "react";
-import { finalizeEvent, getPublicKey, nip19, type EventTemplate } from "nostr-tools";
+// src/nostr/useAuth.ts
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  finalizeEvent,
+  getPublicKey,
+  nip19,
+  type EventTemplate,
+  SimplePool,
+} from "nostr-tools";
 import type { Signer } from "./types";
+import { RELAYS } from "./constants";
 
 const STORAGE_KEY = "pawnstr:signer";
+
+const getStorage = () =>
+  import.meta.env.DEV ? sessionStorage : localStorage;
+
+const META_KEY_PREFIX = "pawnstr:metadata:";
+const metadataKey = (pubkey: string) => `${META_KEY_PREFIX}${pubkey}`;
+
+// FIX: fully defined type instead of empty placeholder
+export type UserMetadata = {
+  name?: string;
+  display_name?: string;
+  picture?: string;
+  image?: string;
+  lud16?: string;
+  lud06?: string;
+  about?: string;
+  website?: string;
+  nip05?: string;
+  banner?: string;
+};
+
+function parseMetadata(content: string): UserMetadata {
+  try {
+    return (JSON.parse(content || "{}") as UserMetadata) ?? {};
+  } catch {
+    return {};
+  }
+}
 
 export function useAuth() {
   const [signer, setSigner] = useState<Signer>(null);
   const [nsecInput, setNsecInput] = useState("");
+  const [metadata, setMetadata] = useState<UserMetadata>({});
+  const [isLoadingMetadata, setIsLoadingMetadata] = useState(false);
 
   const pubkey = signer?.pubkey ?? null;
+  const hasNip07 =
+    typeof window !== "undefined" && !!(window as any).nostr;
 
-  // RESTORE SESSION ON LOAD
+  // ==================== RESTORE LOGIN ====================
   useEffect(() => {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const storage = getStorage();
+    const raw = storage.getItem(STORAGE_KEY);
     if (!raw) return;
 
     try {
       const parsed = JSON.parse(raw);
 
-      if (
-        parsed &&
-        parsed.type === "nip07" &&
-        typeof parsed.pubkey === "string"
-      ) {
-        setSigner(parsed);
+      if (parsed?.type === "nip07" && parsed?.pubkey) {
+        setSigner({ type: "nip07", pubkey: parsed.pubkey });
         return;
       }
 
       if (
-        parsed &&
-        parsed.type === "nsec" &&
-        typeof parsed.pubkey === "string" &&
-        Array.isArray(parsed.sk)
+        parsed?.type === "nsec" &&
+        parsed?.pubkey &&
+        Array.isArray(parsed?.sk)
       ) {
         setSigner({
           type: "nsec",
           pubkey: parsed.pubkey,
-          sk: new Uint8Array(parsed.sk),
+          sk: Uint8Array.from(parsed.sk),
         });
       }
     } catch (e) {
@@ -44,129 +80,176 @@ export function useAuth() {
     }
   }, []);
 
-  // Robust NIP-07 detection
-  const [hasNip07, setHasNip07] = useState(false);
-
+  // Load cached metadata when pubkey changes
   useEffect(() => {
-    const check = () => typeof window !== "undefined" && !!window.nostr;
-
-    if (check()) {
-      setHasNip07(true);
+    if (!pubkey) {
+      setMetadata({});
       return;
     }
-
-    const interval = window.setInterval(() => {
-      if (check()) {
-        setHasNip07(true);
-        window.clearInterval(interval);
-      }
-    }, 200);
-
-    const timeout = window.setTimeout(() => {
-      window.clearInterval(interval);
-    }, 5000);
-
-    return () => {
-      window.clearInterval(interval);
-      window.clearTimeout(timeout);
-    };
-  }, []);
-
-  const loginWithExtension = useCallback(async () => {
-    if (!window.nostr?.getPublicKey) {
-      alert(
-        "No NIP-07 extension found.\n\nInstall/enable nos2x or Alby, then refresh this page."
-      );
-      return;
-    }
-
+    const cached = localStorage.getItem(metadataKey(pubkey));
+    if (!cached) return;
     try {
-      const pk = await window.nostr.getPublicKey();
+      setMetadata(JSON.parse(cached));
+    } catch {}
+  }, [pubkey]);
 
-      const signerObj = { type: "nip07", pubkey: pk } as const;
+  // ==================== FETCH METADATA ====================
+  const fetchMetadata = useCallback(
+    async (pk: string, force = false) => {
+      if (!pk) return;
 
-      setSigner(signerObj);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(signerObj));
+      if (!force) {
+        const cached = localStorage.getItem(metadataKey(pk));
+        if (cached) {
+          try {
+            setMetadata(JSON.parse(cached));
+          } catch {}
+          // Still return early — only fetch fresh when forced
+          return;
+        }
+      }
+
+      setIsLoadingMetadata(true);
+      const pool = new SimplePool();
+
+      try {
+        let latest: any = null;
+
+        await new Promise<void>((resolve) => {
+          const sub = pool.subscribeMany(
+            RELAYS,
+            [{ kinds: [0], authors: [pk], limit: 20 }],
+            {
+              onevent(ev) {
+                if (!latest || ev.created_at > latest.created_at)
+                  latest = ev;
+              },
+              oneose() {
+                try { sub.close(); } catch {}
+                resolve();
+              },
+            }
+          );
+
+          setTimeout(() => {
+            try { sub.close(); } catch {}
+            resolve();
+          }, 2500);
+        });
+
+        if (latest?.content) {
+          const parsed = parseMetadata(latest.content);
+          setMetadata(parsed);
+          localStorage.setItem(metadataKey(pk), JSON.stringify(parsed));
+        }
+      } catch (e) {
+        console.error("Failed to fetch metadata", e);
+      } finally {
+        try { pool.close(RELAYS); } catch {}
+        setIsLoadingMetadata(false);
+      }
+    },
+    []
+  );
+
+  // Fetch on login
+  useEffect(() => {
+    if (!pubkey) return;
+    fetchMetadata(pubkey);
+  }, [pubkey, fetchMetadata]);
+
+  // ==================== LOGIN ====================
+  const loginWithExtension = useCallback(async () => {
+    const nostr = (window as any).nostr;
+    if (!nostr?.getPublicKey) {
+      alert("No NIP-07 extension found.");
+      return;
+    }
+    try {
+      const pk = await nostr.getPublicKey();
+      const next: Signer = { type: "nip07", pubkey: pk };
+      setSigner(next);
+      getStorage().setItem(STORAGE_KEY, JSON.stringify(next));
     } catch (e) {
       console.error(e);
-      alert("Extension rejected the request or failed.");
+      alert("Extension login failed.");
     }
   }, []);
 
   const loginWithNsec = useCallback(() => {
-    const confirmed = window.confirm(
-      "Warning: Pasting your nsec is dangerous.\n\nThis gives the website access to your private key. Only continue if you trust this site and understand the risk.\n\nDo you want to continue?"
-    );
-
-    if (!confirmed) return;
+    const raw = nsecInput.trim();
+    if (!raw) return alert("Paste nsec first.");
 
     try {
-      const trimmed = nsecInput.trim();
-      const decoded = nip19.decode(trimmed);
-      if (decoded.type !== "nsec") throw new Error("Not an nsec");
+      const decoded = nip19.decode(raw);
+      if (decoded.type !== "nsec") return alert("Invalid nsec.");
 
       const sk = decoded.data as Uint8Array;
       const pk = getPublicKey(sk);
 
-      const signerObj = {
-        type: "nsec" as const,
-        pubkey: pk,
-        sk,
-      };
-
-      setSigner(signerObj);
-      setNsecInput("");
-
-      // EASY BUT UNSAFE: persist secret key in localStorage
-      localStorage.setItem(
+      const next: Signer = { type: "nsec", pubkey: pk, sk };
+      setSigner(next);
+      getStorage().setItem(
         STORAGE_KEY,
-        JSON.stringify({
-          type: "nsec",
-          pubkey: pk,
-          sk: Array.from(sk),
-        })
+        JSON.stringify({ type: "nsec", pubkey: pk, sk: Array.from(sk) })
       );
     } catch (e) {
       console.error(e);
-      alert("Invalid nsec. It should start with nsec1...");
+      alert("Invalid nsec.");
     }
   }, [nsecInput]);
 
   const logout = useCallback(() => {
     setSigner(null);
     setNsecInput("");
-    localStorage.removeItem(STORAGE_KEY);
+    setMetadata({});
+    getStorage().removeItem(STORAGE_KEY);
   }, []);
 
+  // ==================== SIGN ====================
   const signEvent = useCallback(
     async (draft: EventTemplate) => {
       if (!signer) throw new Error("Not logged in");
-
       if (signer.type === "nip07") {
-        if (!window.nostr?.signEvent) {
-          throw new Error("No NIP-07 signing available");
-        }
-        return await window.nostr.signEvent(draft);
+        return await (window as any).nostr!.signEvent(draft);
       }
-
       return finalizeEvent(draft, signer.sk);
     },
     [signer]
   );
 
+  // ==================== REFRESH ====================
+  const refreshMetadata = useCallback(() => {
+    if (pubkey) fetchMetadata(pubkey, true);
+  }, [pubkey, fetchMetadata]);
+
+  // ==================== DERIVED ====================
+  const displayName = useMemo(
+    () =>
+      metadata.display_name ||
+      metadata.name ||
+      (pubkey ? `${pubkey.slice(0, 8)}...${pubkey.slice(-4)}` : ""),
+    [metadata, pubkey]
+  );
+
+  const avatar = metadata.picture || metadata.image || "";
+  const lightning = metadata.lud16 || metadata.lud06 || "";
+
   return {
     signer,
-    setSigner,
     pubkey,
-
+    hasNip07,
     nsecInput,
     setNsecInput,
-
-    hasNip07,
     loginWithExtension,
     loginWithNsec,
     logout,
-
     signEvent,
+    metadata,
+    displayName,
+    avatar,
+    lightning,
+    isLoadingMetadata,
+    refreshMetadata,
   };
 }

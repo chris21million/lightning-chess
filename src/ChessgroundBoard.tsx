@@ -3,15 +3,14 @@ import { Chess } from "chess.js";
 import { Chessground } from "chessground";
 import type { Api } from "chessground/api";
 import type { Config } from "chessground/config";
-
 import "chessground/assets/chessground.base.css";
 import "chessground/assets/chessground.brown.css";
 import "chessground/assets/chessground.cburnett.css";
 
 type Props = {
   game: Chess;
-  currentGame?: { white: string; black: string } | null;   // ← NEW: from useLobbyGame
-  pubkey?: string | null;                                   // ← NEW: your pubkey
+  currentGame?: { white: string; black: string } | null;
+  pubkey?: string | null;
   onChange: () => void;
   onMove?: (from: string, to: string) => void;
 };
@@ -26,7 +25,6 @@ export default function ChessgroundBoard({
   const elRef = useRef<HTMLDivElement | null>(null);
   const apiRef = useRef<Api | null>(null);
 
-  // Determine which color the current player is allowed to move
   const myColor = currentGame && pubkey
     ? currentGame.white === pubkey
       ? "white"
@@ -43,20 +41,35 @@ export default function ChessgroundBoard({
 
     const config: Config = {
       fen: game.fen(),
-      orientation: myColor === "black" ? "black" : "white",   // auto-orient to your side
+      orientation: myColor === "black" ? "black" : "white",
       turnColor: game.turn() === "w" ? "white" : "black",
       movable: {
-        color: isMyTurn ? (myColor as "white" | "black") : undefined,   // ← THIS IS THE FIX
+        color: isMyTurn ? (myColor as "white" | "black") : undefined,
         free: false,
         dests: calcDests(game),
         events: {
           after: (orig, dest) => {
             const move = game.move({ from: orig, to: dest, promotion: "q" });
-
             if (!move) {
               apiRef.current?.set({ fen: game.fen(), movable: { dests: calcDests(game) } });
               return;
             }
+
+            // ============ NEW: GAME OVER DETECTION ============
+            if (game.isGameOver()) {
+              if (game.isCheckmate()) {
+                setTimeout(() => alert(
+                  game.turn() === "w"
+                    ? "⬛ Black wins by checkmate!"
+                    : "⬜ White wins by checkmate!"
+                ), 100);
+              } else if (game.isStalemate()) {
+                setTimeout(() => alert("Draw — Stalemate!"), 100);
+              } else if (game.isDraw()) {
+                setTimeout(() => alert("Draw!"), 100);
+              }
+            }
+            // ==================================================
 
             onMove?.(orig, dest);
             onChange();
@@ -75,7 +88,6 @@ export default function ChessgroundBoard({
     };
 
     apiRef.current = Chessground(el, config);
-
     return () => {
       apiRef.current?.destroy?.();
       apiRef.current = null;
@@ -85,7 +97,6 @@ export default function ChessgroundBoard({
   // Keep board in sync when game updates (opponent moves, reset, etc.)
   useEffect(() => {
     if (!apiRef.current) return;
-
     apiRef.current.set({
       fen: game.fen(),
       orientation: myColor === "black" ? "black" : "white",
@@ -111,12 +122,10 @@ export default function ChessgroundBoard({
 function calcDests(game: Chess) {
   const dests = new Map<string, string[]>();
   const moves = game.moves({ verbose: true }) as Array<{ from: string; to: string }>;
-
   for (const m of moves) {
     const arr = dests.get(m.from);
     if (arr) arr.push(m.to);
     else dests.set(m.from, [m.to]);
   }
-
   return dests;
 }
