@@ -1,3 +1,6 @@
+////////////////////////////////////////
+// IMPORTS
+////////////////////////////////////////
 import { useEffect, useRef } from "react";
 import { Chess } from "chess.js";
 import { Chessground } from "chessground";
@@ -6,7 +9,13 @@ import type { Config } from "chessground/config";
 import "chessground/assets/chessground.base.css";
 import "chessground/assets/chessground.brown.css";
 import "chessground/assets/chessground.cburnett.css";
+////////////////////////////////////////
+// END IMPORTS
+////////////////////////////////////////
 
+////////////////////////////////////////
+// PROPS
+////////////////////////////////////////
 type Props = {
   game: Chess;
   currentGame?: { white: string; black: string } | null;
@@ -14,7 +23,41 @@ type Props = {
   onChange: () => void;
   onMove?: (from: string, to: string) => void;
 };
+////////////////////////////////////////
+// END PROPS
+////////////////////////////////////////
 
+////////////////////////////////////////
+// PIECE SYMBOLS — unicode map for captured piece display
+////////////////////////////////////////
+const PIECE_SYMBOLS: Record<string, string> = {
+  p: "♟", r: "♜", n: "♞", b: "♝", q: "♛", k: "♚",
+  P: "♙", R: "♖", N: "♘", B: "♗", Q: "♕", K: "♔",
+};
+////////////////////////////////////////
+// END PIECE SYMBOLS
+////////////////////////////////////////
+
+////////////////////////////////////////
+// CAPTURED PIECES — derives taken pieces from move history
+////////////////////////////////////////
+function getCaptured(game: Chess): { byWhite: string[]; byBlack: string[] } {
+  const byWhite: string[] = [];
+  const byBlack: string[] = [];
+  for (const move of game.history({ verbose: true }) as any[]) {
+    if (!move.captured) continue;
+    if (move.color === "w") byWhite.push(PIECE_SYMBOLS[move.captured.toUpperCase()]);
+    else byBlack.push(PIECE_SYMBOLS[move.captured.toLowerCase()]);
+  }
+  return { byWhite, byBlack };
+}
+////////////////////////////////////////
+// END CAPTURED PIECES
+////////////////////////////////////////
+
+////////////////////////////////////////
+// COMPONENT
+////////////////////////////////////////
 export default function ChessgroundBoard({
   game,
   currentGame,
@@ -25,6 +68,9 @@ export default function ChessgroundBoard({
   const elRef = useRef<HTMLDivElement | null>(null);
   const apiRef = useRef<Api | null>(null);
 
+  ////////////////////////////////////////
+  // DERIVED — player color + turn
+  ////////////////////////////////////////
   const myColor = currentGame && pubkey
     ? currentGame.white === pubkey
       ? "white"
@@ -34,7 +80,25 @@ export default function ChessgroundBoard({
     : null;
 
   const isMyTurn = myColor && game.turn() === myColor[0];
+  ////////////////////////////////////////
+  // END DERIVED — player color + turn
+  ////////////////////////////////////////
 
+  ////////////////////////////////////////
+  // DERIVED — captured pieces split by side
+  // topCaptures = opponent's taken pieces (shown left)
+  // bottomCaptures = your taken pieces (shown right)
+  ////////////////////////////////////////
+  const { byWhite, byBlack } = getCaptured(game);
+  const topCaptures = myColor === "black" ? byWhite : byBlack;
+  const bottomCaptures = myColor === "black" ? byBlack : byWhite;
+  ////////////////////////////////////////
+  // END DERIVED — captured pieces
+  ////////////////////////////////////////
+
+  ////////////////////////////////////////
+  // EFFECT — init chessground board
+  ////////////////////////////////////////
   useEffect(() => {
     const el = elRef.current;
     if (!el) return;
@@ -43,6 +107,14 @@ export default function ChessgroundBoard({
       fen: game.fen(),
       orientation: myColor === "black" ? "black" : "white",
       turnColor: game.turn() === "w" ? "white" : "black",
+      ////////////////////////////////////////
+      // coordinates: false — prevents 12345678abcdefgh
+      // labels from escaping outside the board div
+      ////////////////////////////////////////
+      coordinates: false,
+      ////////////////////////////////////////
+      // END coordinates fix
+      ////////////////////////////////////////
       movable: {
         color: isMyTurn ? (myColor as "white" | "black") : undefined,
         free: false,
@@ -55,7 +127,9 @@ export default function ChessgroundBoard({
               return;
             }
 
-            // ============ NEW: GAME OVER DETECTION ============
+            ////////////////////////////////////////
+            // GAME OVER DETECTION
+            ////////////////////////////////////////
             if (game.isGameOver()) {
               if (game.isCheckmate()) {
                 setTimeout(() => alert(
@@ -69,11 +143,12 @@ export default function ChessgroundBoard({
                 setTimeout(() => alert("Draw!"), 100);
               }
             }
-            // ==================================================
+            ////////////////////////////////////////
+            // END GAME OVER DETECTION
+            ////////////////////////////////////////
 
             onMove?.(orig, dest);
             onChange();
-
             apiRef.current?.set({
               fen: game.fen(),
               turnColor: game.turn() === "w" ? "white" : "black",
@@ -93,8 +168,13 @@ export default function ChessgroundBoard({
       apiRef.current = null;
     };
   }, [game, currentGame, pubkey, isMyTurn, onChange, onMove]);
+  ////////////////////////////////////////
+  // END EFFECT — init chessground board
+  ////////////////////////////////////////
 
-  // Keep board in sync when game updates (opponent moves, reset, etc.)
+  ////////////////////////////////////////
+  // EFFECT — sync board on opponent move / reset
+  ////////////////////////////////////////
   useEffect(() => {
     if (!apiRef.current) return;
     apiRef.current.set({
@@ -107,18 +187,90 @@ export default function ChessgroundBoard({
       },
     });
   }, [game, currentGame, pubkey, isMyTurn]);
+  ////////////////////////////////////////
+  // END EFFECT — sync board
+  ////////////////////////////////////////
 
+  ////////////////////////////////////////
+  // RENDER
+  // Layout: [opponent captures col] [board] [my captures col]
+  // overflow:hidden on board wrapper contains cg-wrap styles
+  // and prevents the mini chessboard icon from leaking out
+  ////////////////////////////////////////
   return (
-    <div style={{ width: "min(92vw, 520px)", aspectRatio: "1 / 1" }}>
-      <div
-        ref={elRef}
-        className="cg-wrap brown"
-        style={{ width: "100%", height: "100%" }}
-      />
+    <div style={{
+      width: "min(92vw, 680px)",
+      display: "flex",
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 16,
+    }}>
+
+      {/* ---- Left column — opponent's captured pieces ---- */}
+      <div style={{
+        width: 36,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        paddingTop: 4,
+        gap: 2,
+      }}>
+        <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 4, letterSpacing: 0.5 }}>
+          {myColor === "black" ? "WHITE" : "BLACK"}
+        </div>
+        {topCaptures.map((p, i) => (
+          <span key={i} style={{ fontSize: 26, lineHeight: 1.2 }}>{p}</span>
+        ))}
+      </div>
+      {/* ---- End left column ---- */}
+
+      {/* ---- Board — overflow:hidden stops cg-wrap leaking out ---- */}
+      <div style={{
+        flex: 1,
+        minWidth: 0,
+        aspectRatio: "1 / 1",
+        position: "relative",
+        overflow: "hidden",
+      }}>
+        <div
+          ref={elRef}
+          className="cg-wrap brown"
+          style={{ width: "100%", height: "100%", display: "block" }}
+        />
+      </div>
+      {/* ---- End board ---- */}
+
+      {/* ---- Right column — my captured pieces ---- */}
+      <div style={{
+        width: 36,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        paddingTop: 4,
+        gap: 2,
+      }}>
+        <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 4, letterSpacing: 0.5 }}>
+          {myColor === "black" ? "BLACK" : "WHITE"}
+        </div>
+        {bottomCaptures.map((p, i) => (
+          <span key={i} style={{ fontSize: 26, lineHeight: 1.2 }}>{p}</span>
+        ))}
+      </div>
+      {/* ---- End right column ---- */}
+
     </div>
   );
+  ////////////////////////////////////////
+  // END RENDER
+  ////////////////////////////////////////
 }
+////////////////////////////////////////
+// END COMPONENT
+////////////////////////////////////////
 
+////////////////////////////////////////
+// UTILITY — calculate legal move destinations for chessground
+////////////////////////////////////////
 function calcDests(game: Chess) {
   const dests = new Map<string, string[]>();
   const moves = game.moves({ verbose: true }) as Array<{ from: string; to: string }>;
@@ -129,3 +281,6 @@ function calcDests(game: Chess) {
   }
   return dests;
 }
+////////////////////////////////////////
+// END UTILITY
+////////////////////////////////////////
