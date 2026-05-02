@@ -8,9 +8,12 @@ import { RELAYS, MOVE_KIND } from "./nostr/constants";
 import { tagValue } from "./nostr/tags";
 import { type EventTemplate } from "nostr-tools";
 import { shortKey } from "./utils/lightning";
+import { useProfile } from "./nostr/useProfile";
 import SideMenu from "./components/SideMenu";
 import LobbyPanel from "./components/LobbyPanel";
 import TipModal from "./components/TipModal";
+import GameOverModal from "./components/GameOverModal";
+import type { GameOverState } from "./components/GameOverModal";
 
 export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -27,14 +30,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Reset
-  const reset = () => {
-    gameRef.current.reset();
-    setTick(0);
-    lastPlyRef.current = 0;
-    lastMoveEventIdRef.current = "none";
-  };
-
   // Auth
   const {
     pubkey, nsecInput, setNsecInput, hasNip07,
@@ -47,56 +42,72 @@ export default function App() {
   const [tipInvoice, setTipInvoice] = useState("");
   const [tipQrDataUrl, setTipQrDataUrl] = useState("");
 
+  ////////////////////////////////////////
+  // GAME OVER STATE — managed in App.tsx
+  // so both winner (via ChessgroundBoard) and
+  // loser (via opponent move subscription) can trigger it
+  ////////////////////////////////////////
+  const [gameOverState, setGameOverState] = useState<GameOverState | null>(null);
+  const gameOverStateRef = useRef<GameOverState | null>(null);
+
+  const triggerGameOver = useCallback((
+    result: GameOverState["result"],
+    reason: GameOverState["reason"],
+    opponentName: string
+  ) => {
+    if (gameOverStateRef.current) return;
+    const state = { result, reason, opponentName };
+    gameOverStateRef.current = state;
+    setGameOverState(state);
+  }, []);
+  ////////////////////////////////////////
+  // END GAME OVER STATE
+  ////////////////////////////////////////
+
   // Move sync refs
   const lastPlyRef = useRef(0);
   const lastMoveEventIdRef = useRef<string>("none");
 
-  // Lobby + game hook
+  // opponentNameRef defined before useLobbyGame so it can be passed in
+  const opponentNameRef = useRef("Opponent");
+
+  // Lobby + game hook — move subscription now lives inside here
   const {
     poolRef, relayStatus, offers,
-    offerSeconds, setOfferSeconds, offerInc, setOfferInc, offerColor, setOfferColor,
+    offerMinutes, setOfferMinutes, offerInc, setOfferInc, offerColor, setOfferColor,
     game, createOffer, cancelOffer, acceptOffer, leaveGame, myOfferEventId,
     challengeNpub, setChallengeNpub, isChallenging, challengePlayer,
-  } = useLobbyGame({ pubkey, signEvent, gameRef, lastPlyRef, lastMoveEventIdRef, forceUpdate });
+  } = useLobbyGame({ 
+    pubkey, signEvent, gameRef, lastPlyRef, lastMoveEventIdRef, forceUpdate,
+    triggerGameOver,
+    opponentNameRef,
+  });
 
-  // Subscribe to opponent moves
+  // Resolve opponent display name via useProfile
+  const opponentPubkey = game
+    ? pubkey === game.white ? game.black : game.white
+    : null;
+  const opponentDisplayName = useProfile(opponentPubkey);
   useEffect(() => {
-    if (!game) return;
-    const pool = poolRef.current;
-    if (!pool) return;
+    opponentNameRef.current = opponentDisplayName || (opponentPubkey ? shortKey(opponentPubkey) : "Opponent");
+  }, [opponentDisplayName, opponentPubkey]);
 
-    const sub = pool.subscribeMany(
-      RELAYS,
-      [{ kinds: [MOVE_KIND], "#d": [game.gameId], since: Math.floor(Date.now() / 1000) - 600, limit: 200 }],
-      {
-        onevent(ev) {
-          if (pubkey && ev.pubkey === pubkey) return;
-          if (tagValue(ev, "d") !== game.gameId) return;
+  ////////////////////////////////////////
+  // RESET GAME OVER when game changes
+  ////////////////////////////////////////
+  useEffect(() => {
+    gameOverStateRef.current = null;
+    setGameOverState(null);
+  }, [game?.gameId]);
+  ////////////////////////////////////////
+  // END RESET GAME OVER
+  ////////////////////////////////////////
 
-          const plyStr = tagValue(ev, "ply");
-          const uci = tagValue(ev, "uci");
-          if (!plyStr || !uci) return;
+  
 
-          const ply = Number(plyStr);
-          if (!Number.isFinite(ply) || ply !== lastPlyRef.current + 1) return;
-
-          const turn = gameRef.current.turn();
-          if (ev.pubkey !== (turn === "w" ? game.white : game.black)) return;
-
-          const move = gameRef.current.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: "q" });
-          if (!move) return;
-
-          lastPlyRef.current = ply;
-          lastMoveEventIdRef.current = ev.id || "";
-          forceUpdate();
-        },
-      }
-    );
-
-    return () => { try { sub.close(); } catch {} };
-  }, [game, pubkey, forceUpdate, poolRef]);
-
-  // Publish local move
+  ////////////////////////////////////////
+  // PUBLISH MOVE
+  ////////////////////////////////////////
   const publishMove = useCallback(async (from: string, to: string) => {
     if (!game || !pubkey) return;
 
@@ -115,7 +126,11 @@ export default function App() {
       const signed = await signEvent(draft);
       const pool = poolRef.current;
       if (!pool) throw new Error("No relay pool");
-      await Promise.any(pool.publish(RELAYS, signed));
+
+      const results = await Promise.allSettled(pool.publish(RELAYS, signed));
+      const anyOk = results.some(r => r.status === "fulfilled");
+      if (!anyOk) throw new Error("No relays accepted the move.");
+
       lastPlyRef.current = ply;
       lastMoveEventIdRef.current = signed.id || "";
     } catch (e: any) {
@@ -123,6 +138,9 @@ export default function App() {
       alert(`Failed to publish move: ${e?.message ?? e}`);
     }
   }, [game, pubkey, signEvent, poolRef]);
+  ////////////////////////////////////////
+  // END PUBLISH MOVE
+  ////////////////////////////////////////
 
   // Derived
   const shortPk = useMemo(() => (pubkey ? shortKey(pubkey) : ""), [pubkey]);
@@ -179,8 +197,8 @@ export default function App() {
         pubkey={pubkey}
         now={now}
         offers={offers}
-        offerSeconds={offerSeconds}
-        setOfferSeconds={setOfferSeconds}
+        offerMinutes={offerMinutes}
+        setOfferMinutes={setOfferMinutes}
         offerInc={offerInc}
         setOfferInc={setOfferInc}
         offerColor={offerColor}
@@ -201,11 +219,25 @@ export default function App() {
         game={gameRef.current}
         currentGame={game}
         pubkey={pubkey}
+        opponentName={opponentDisplayName || (opponentPubkey ? shortKey(opponentPubkey) : "Opponent")}
         onChange={forceUpdate}
         onMove={publishMove}
+        onLeaveGame={leaveGame}
+        externalGameOver={gameOverState}
+        onTriggerGameOver={triggerGameOver}
       />
 
-      <button onClick={reset}>Reset</button>
+      {/* App level game over modal — handles loser side */}
+      <GameOverModal
+        state={gameOverState}
+        onLeave={() => {
+          gameOverStateRef.current = null;
+          setGameOverState(null);
+          leaveGame();
+        }}
+      />
+
+      <button onClick={() => window.open("https://nostr.org", "_blank")}>What is Nostr?</button>
 
       <TipModal
         open={tipModalOpen}
@@ -213,6 +245,41 @@ export default function App() {
         invoice={tipInvoice}
         qrDataUrl={tipQrDataUrl}
       />
+
+      {/* ---- Footer ---- */}
+      <div style={{
+        marginTop: 8,
+        paddingTop: 16,
+        borderTop: "1px solid rgba(255,255,255,0.08)",
+        width: "min(92vw, 680px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        fontSize: 12,
+        color: "rgba(255,255,255,0.35)",
+      }}>
+        <button
+          onClick={() => window.open("https://primal.net/p/nprofile1qqsgghzf9zufmmtta8ysg8em6pqhzzg9xg89glyqpx79qe3g02eefugs96cxa", "_blank")}
+          style={{ background: "none", border: "none", color: "rgba(255,255,255,0.35)", fontSize: 12, cursor: "pointer", padding: 0 }}
+        >
+          made with ♥ by chris21million
+        </button>
+        <button
+          onClick={() => window.open("lightning:chris21million@rizful.com")}
+          style={{
+            background: "rgba(247,211,0,0.1)",
+            border: "1px solid rgba(247,211,0,0.25)",
+            borderRadius: 6,
+            color: "#f7d300",
+            fontSize: 12,
+            padding: "4px 10px",
+            cursor: "pointer",
+          }}
+        >
+          ⚡ zap me
+        </button>
+      </div>
+      {/* ---- End footer ---- */}
 
     </div>
   );

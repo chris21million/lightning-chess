@@ -25,8 +25,8 @@ interface Props {
   pubkey: string | null;
   now: number;
   offers: Offer[];
-  offerSeconds: number;
-  setOfferSeconds: (v: number) => void;
+  offerMinutes: number;
+  setOfferMinutes: (v: number) => void;
   offerInc: number;
   setOfferInc: (v: number) => void;
   offerColor: string;
@@ -43,13 +43,85 @@ interface Props {
   challengePlayer: () => void;
 }
 
+////////////////////////////////////////
+// OFFER ROW — separate component so useProfile can be called per offer
+////////////////////////////////////////
+function OfferRow({
+  o,
+  now,
+  pubkey,
+  cancelOffer,
+  acceptOffer,
+}: {
+  o: Offer;
+  now: number;
+  pubkey: string | null;
+  cancelOffer: (id?: string) => void;
+  acceptOffer: (o: Offer) => void;
+}) {
+  const displayName = useProfile(o.pubkey);
+  const age = now - o.created_at;
+  const expired = age > 300;
+  const secondsLeft = Math.max(0, 300 - age);
+  const minutes = Math.floor(secondsLeft / 60);
+  const seconds = secondsLeft % 60;
+  const timer = `${minutes}:${String(seconds).padStart(2, "0")}`;
+  const isMyOffer = pubkey === o.pubkey;
+
+  return (
+    <div
+      style={{
+        border: "1px solid rgba(255,255,255,0.12)",
+        borderRadius: 8,
+        padding: 10,
+        display: "flex",
+        justifyContent: "space-between",
+        gap: 12,
+        flexWrap: "wrap",
+        opacity: expired ? 0.35 : 1,
+        transition: "opacity 0.5s",
+      }}
+    >
+      <div>
+        <div style={{ fontWeight: 600, fontSize: 13 }}>
+          {displayName || shortKey(o.pubkey)}
+        </div>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>
+          {Math.floor(o.time / 60)}m + {o.inc}s • host plays: {o.color}
+        </div>
+        <div style={{
+          fontSize: 11,
+          marginTop: 4,
+          color: expired ? "#888" : secondsLeft < 60 ? "#ff6b6b" : "#88cc88",
+        }}>
+          {expired ? "⏰ Expired" : `⏱ ${timer}`}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        {isMyOffer ? (
+          <button onClick={() => cancelOffer(o.id)} style={{ color: "#ff6b6b" }}>
+            Cancel
+          </button>
+        ) : (
+          <button disabled={!pubkey || expired} onClick={() => acceptOffer(o)}>
+            Accept
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+////////////////////////////////////////
+// END OFFER ROW
+////////////////////////////////////////
+
 export default function LobbyPanel({
   game,
   pubkey,
   now,
   offers,
-  offerSeconds,
-  setOfferSeconds,
+  offerMinutes,
+  setOfferMinutes,
   offerInc,
   setOfferInc,
   offerColor,
@@ -81,7 +153,6 @@ export default function LobbyPanel({
       }}
     >
       {game ? (
-        /* ---- Active game view ---- */
         <>
           <div style={{ fontWeight: 600 }}>Current game</div>
           <div style={{ fontSize: 12, opacity: 0.85, fontFamily: "monospace" }}>
@@ -89,19 +160,20 @@ export default function LobbyPanel({
           </div>
           <div style={{ fontSize: 12, opacity: 0.85 }}>
             White: {whiteName || shortKey(game.white)} • Black: {blackName || shortKey(game.black)} •{" "}
-            {game.time}s + {game.inc}s
+            {Math.floor(game.time / 60)}m + {game.inc}s
           </div>
-          <button onClick={leaveGame}>Leave game</button>
+          <button onClick={leaveGame} style={{ width: "fit-content", padding: "6px 20px" }}>
+            Leave game
+          </button>
         </>
       ) : (
-        /* ---- Lobby view ---- */
         <>
           <ChallengePlayer
             challengeNpub={challengeNpub}
             setChallengeNpub={setChallengeNpub}
             isChallenging={isChallenging}
             challengePlayer={challengePlayer}
-            offerSeconds={offerSeconds}
+            offerMinutes={offerMinutes}
             offerInc={offerInc}
             offerColor={offerColor}
           />
@@ -109,7 +181,7 @@ export default function LobbyPanel({
           {/* ---- Game settings + create offer ---- */}
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
             <div>
-              <div style={{ fontWeight: 600 }}>Find a Game</div>
+              <div style={{ fontWeight: 600 }}>Create game</div>
               <div style={{ opacity: 0.75, fontSize: 12 }}>
                 Relays: {relayStatus} ({RELAYS.length})
               </div>
@@ -119,9 +191,9 @@ export default function LobbyPanel({
                 Time{" "}
                 <input
                   type="number"
-                  value={offerSeconds}
-                  min={10}
-                  onChange={(e) => setOfferSeconds(Number(e.target.value))}
+                  value={offerMinutes}
+                  min={1}
+                  onChange={(e) => setOfferMinutes(Number(e.target.value))}
                   style={{ width: 90, marginLeft: 6 }}
                 />
               </label>
@@ -165,57 +237,16 @@ export default function LobbyPanel({
             {offers.length === 0 ? (
               <div style={{ opacity: 0.7 }}>No offers yet.</div>
             ) : (
-              offers.map((o) => {
-                const age = now - o.created_at;
-                const expired = age > 300;
-                const secondsLeft = Math.max(0, 300 - age);
-                const minutes = Math.floor(secondsLeft / 60);
-                const seconds = secondsLeft % 60;
-                const timer = `${minutes}:${String(seconds).padStart(2, "0")}`;
-                const isMyOffer = pubkey === o.pubkey;
-
-                return (
-                  <div
-                    key={o.id}
-                    style={{
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      borderRadius: 8,
-                      padding: 10,
-                      display: "flex",
-                      justifyContent: "space-between",
-                      gap: 12,
-                      flexWrap: "wrap",
-                      opacity: expired ? 0.35 : 1,
-                      transition: "opacity 0.5s",
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontFamily: "monospace" }}>{shortKey(o.pubkey)}</div>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>
-                        {o.time}s + {o.inc}s • host plays: {o.color}
-                      </div>
-                      <div style={{
-                        fontSize: 11,
-                        marginTop: 4,
-                        color: expired ? "#888" : secondsLeft < 60 ? "#ff6b6b" : "#88cc88",
-                      }}>
-                        {expired ? "⏰ Expired" : `⏱ ${timer}`}
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      {isMyOffer ? (
-                        <button onClick={() => cancelOffer(o.id)} style={{ color: "#ff6b6b" }}>
-                          Cancel
-                        </button>
-                      ) : (
-                        <button disabled={!pubkey || expired} onClick={() => acceptOffer(o)}>
-                          Accept
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
+              offers.map((o) => (
+                <OfferRow
+                  key={o.id}
+                  o={o}
+                  now={now}
+                  pubkey={pubkey}
+                  cancelOffer={cancelOffer}
+                  acceptOffer={acceptOffer}
+                />
+              ))
             )}
           </div>
           {/* ---- End offers list ---- */}

@@ -5,7 +5,7 @@ type ChallengePlayerProps = {
   setChallengeNpub: (value: string) => void;
   isChallenging: boolean;
   challengePlayer: () => Promise<void>;
-  offerSeconds: number;
+  offerMinutes: number;
   offerInc: number;
   offerColor: "random" | "white" | "black";
 };
@@ -15,7 +15,7 @@ export default function ChallengePlayer({
   setChallengeNpub,
   isChallenging,
   challengePlayer,
-  offerSeconds,
+  offerMinutes,
   offerInc,
   offerColor,
 }: ChallengePlayerProps) {
@@ -27,20 +27,20 @@ export default function ChallengePlayer({
   return (
     <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 mb-8">
       <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-        ⚔️ Challenge a specific player
+        
       </h2>
 
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* NPUB Input */}
         <div>
           <label className="block text-sm text-zinc-400 mb-1">
-            Paste npub1... 
+            
           </label>
           <input
             type="text"
             value={challengeNpub}
             onChange={(e) => setChallengeNpub(e.target.value)}
-            placeholder="npub1abc... or hex pubkey"
+            placeholder="npub1... or hex"
             className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500 font-mono text-sm"
             disabled={isChallenging}
           />
@@ -48,7 +48,7 @@ export default function ChallengePlayer({
 
         {/* Current Settings Summary */}
         <div className="bg-zinc-800 rounded-lg p-3 text-sm text-zinc-300">
-          Game: {offerSeconds}s + {offerInc}s • Color: <span className="capitalize">{offerColor}</span>
+         
         </div>
 
         {/* Button */}
@@ -65,7 +65,8 @@ export default function ChallengePlayer({
         </button>
 
         <p className="text-xs text-zinc-500 text-center">
-          The player will see your challenge in their offers list
+          
+
         </p>
       </form>
     </div>

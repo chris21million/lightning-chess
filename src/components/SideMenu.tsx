@@ -170,7 +170,7 @@ export default function SideMenu({
             background: "rgba(255,255,255,0.03)",
           }}
         >
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>Send a tip ⚡</div>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>Send a zap ⚡</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <input
               value={tipRecipient}
@@ -213,7 +213,7 @@ export default function SideMenu({
               </button>
             </div>
             <div style={{ fontSize: 11, opacity: 0.75 }}>
-              Purely voluntary tips • Good game / nice move
+              Zap a good game / nice move ⚡
             </div>
           </div>
         </div>
